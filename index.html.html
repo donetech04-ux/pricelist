@@ -1,0 +1,1612 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DONETECH - Pricelist Sparepart</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <!-- FontAwesome untuk ikon -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap');
+        body { font-family: 'Plus Jakarta Sans', sans-serif; }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-800 min-h-screen flex flex-col">
+
+    <!-- Container Utama Aplikasi -->
+    <div id="app" class="flex-1 flex flex-col">
+        <!-- Render dinamis via JavaScript -->
+    </div>
+
+    <!-- Modal Admin Login -->
+    <div id="loginModal" class="fixed inset-0 bg-black/60 z-50 hidden flex items-center justify-center p-4">
+        <div class="bg-white rounded-2xl w-full max-w-md p-6 shadow-2xl">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-xl font-bold text-slate-900"><i class="fa-solid fa-lock text-blue-600 mr-2"></i>Login Admin DONETECH</h3>
+                <button onclick="closeLoginModal()" class="text-slate-400 hover:text-slate-600"><i class="fa-solid fa-xmark text-xl"></i></button>
+            </div>
+            <form onsubmit="handleLogin(event)" class="space-y-4">
+                <div>
+                    <label class="block text-sm font-medium text-slate-700 mb-1">Username</label>
+                    <input type="text" id="adminUser" required class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="Masukkan username">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-slate-700 mb-1">Password</label>
+                    <input type="password" id="adminPass" required class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="Masukkan password">
+                </div>
+                <div id="loginError" class="text-red-500 text-sm hidden">Username atau password salah!</div>
+                <button type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2.5 rounded-lg transition">Masuk Panel Admin</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Script Aplikasi Utama -->
+    <script>
+        // --- DATABASE INDEXEDDB WRAPPER ---
+        const DB_NAME = 'DonetechDB';
+        const DB_VERSION = 1;
+        let db = null;
+
+        const STORES = ['brands', 'models', 'categories', 'grades', 'products', 'settings'];
+
+        function initDB() {
+            return new Promise((resolve, reject) => {
+                const request = indexedDB.open(DB_NAME, DB_VERSION);
+                request.onerror = () => reject(request.error);
+                request.onsuccess = () => {
+                    db = request.result;
+                    resolve(db);
+                };
+                request.onupgradeneeded = (event) => {
+                    const database = event.target.result;
+                    STORES.forEach(store => {
+                        if (!database.objectStoreNames.contains(store)) {
+                            database.createObjectStore(store, { keyPath: 'id', autoIncrement: true });
+                        }
+                    });
+                };
+            });
+        }
+
+        function dbTx(storeName, mode, callback) {
+            return new Promise((resolve, reject) => {
+                if (!db) {
+                    reject('Database belum diinisialisasi');
+                    return;
+                }
+                const transaction = db.transaction(storeName, mode);
+                const store = transaction.objectStore(storeName);
+                let request = callback(store);
+                
+                transaction.oncomplete = () => resolve(request ? request.result : null);
+                transaction.onerror = () => reject(transaction.error);
+            });
+        }
+
+        // Generic DB Helpers
+        async function getAll(store) { return await dbTx(store, 'readonly', s => s.getAll()); }
+        async function addRecord(store, data) { data.createdAt = new Date().toISOString(); return await dbTx(store, 'readwrite', s => s.add(data)); }
+        async function updateRecord(store, data) { data.updatedAt = new Date().toISOString(); return await dbTx(store, 'readwrite', s => s.put(data)); }
+        async function deleteRecord(store, id) { return await dbTx(store, 'readwrite', s => s.delete(Number(id))); }
+
+        // --- STATE MANAGEMENT ---
+        let state = {
+            view: 'customer', // customer, admin
+            adminTab: 'dashboard',
+            selectedBrand: null,
+            selectedModel: null,
+            selectedCategory: null,
+            selectedProduct: null,
+            searchQuery: '',
+            filterBrand: '',
+            filterCategory: '',
+            filterGrade: '',
+            filterStatus: '',
+            sortBy: 'terbaru',
+            isAdminLoggedIn: false,
+            // Cache data
+            brands: [],
+            models: [],
+            categories: [],
+            grades: [],
+            products: [],
+            settings: {
+                storeName: 'DONETECH',
+                tagline: 'SERVICE HP & LAPTOP',
+                address: 'Dk. Jetis 002/001, Kuwukan, Dawe, Kudus',
+                whatsapp: '0821-3393-5158',
+                logo: ''
+            }
+        };
+
+        // --- LOAD INITIAL DATA ---
+        async function loadAppData() {
+            try {
+                await initDB();
+                state.brands = await getAll('brands');
+                state.models = await getAll('models');
+                state.categories = await getAll('categories');
+                state.grades = await getAll('grades');
+                state.products = await getAll('products');
+                
+                const settingsList = await getAll('settings');
+                if (settingsList.length > 0) {
+                    state.settings = settingsList[0];
+                } else {
+                    // Simpan default setting jika kosong
+                    await addRecord('settings', state.settings);
+                    const allSets = await getAll('settings');
+                    state.settings = allSets[0];
+                }
+            } catch (err) {
+                console.error('Gagal memuat database:', err);
+            }
+            render();
+        }
+
+        // --- ROUTING & RENDER ---
+        function render() {
+            const app = document.getElementById('app');
+            app.innerHTML = '';
+
+            if (state.view === 'customer') {
+                app.innerHTML = renderCustomerView();
+            } else if (state.view === 'admin') {
+                if (!state.isAdminLoggedIn) {
+                    state.view = 'customer';
+                    openLoginModal();
+                    render();
+                    return;
+                }
+                app.innerHTML = renderAdminView();
+            }
+        }
+
+        // --- CUSTOMER VIEW COMPONENTS ---
+        function renderCustomerView() {
+            const waNumberClean = state.settings.whatsapp.replace(/[^0-9]/g, '');
+            const normalizedWA = waNumberClean.startsWith('0') ? '62' + waNumberClean.slice(1) : waNumberClean;
+
+            return `
+                <!-- Header Toko -->
+                <header class="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-xs">
+                    <div class="max-w-7xl mx-auto px-4 py-4 flex flex-col sm:flex-row justify-between items-center gap-4">
+                        <div class="flex items-center gap-3 cursor-pointer" onclick="resetCustomerNav()">
+                            ${state.settings.logo ? `<img src="${state.settings.logo}" class="w-12 h-12 object-contain rounded-lg border">` : `<div class="w-12 h-12 bg-blue-600 text-white rounded-lg flex items-center justify-center font-bold text-xl"><i class="fa-solid fa-screwdriver-wrench"></i></div>`}
+                            <div>
+                                <h1 class="text-xl font-bold text-slate-900 uppercase">${state.settings.storeName}</h1>
+                                <p class="text-xs text-slate-500 font-medium">${state.settings.tagline} - PRICELIST SPAREPART</p>
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-3 w-full sm:w-auto justify-end">
+                            <div class="relative flex-1 sm:w-80">
+                                <span class="absolute inset-y-0 left-0 flex items-center pl-3 text-slate-400"><i class="fa-solid fa-search"></i></span>
+                                <input type="text" id="globalSearch" value="${state.searchQuery}" oninput="handleGlobalSearch(this.value)" placeholder="Cari sparepart, brand, model..." class="w-full pl-10 pr-4 py-2 bg-slate-100 border-none rounded-xl text-sm focus:ring-2 focus:ring-blue-500 focus:bg-white focus:outline-none transition">
+                            </div>
+                            <button onclick="openLoginModal()" class="bg-slate-900 hover:bg-slate-800 text-white px-4 py-2 rounded-xl text-sm font-semibold transition flex items-center gap-2"><i class="fa-solid fa-user-shield"></i> <span class="hidden md:inline">Admin</span></button>
+                        </div>
+                    </div>
+                </header>
+
+                <!-- Main Content Area -->
+                <main class="max-w-7xl mx-auto px-4 py-6 flex-1 w-full">
+                    <!-- Breadcrumb Navigasi -->
+                    <nav class="flex items-center text-sm text-slate-500 mb-6 space-x-2 overflow-x-auto whitespace-nowrap pb-2">
+                        <button onclick="resetCustomerNav()" class="hover:text-blue-600 font-medium"><i class="fa-solid fa-house mr-1"></i> Beranda</button>
+                        ${state.selectedBrand ? `<span class="text-slate-300">/</span> <button onclick="selectBrand(null)" class="hover:text-blue-600 font-medium">${getBrandName(state.selectedBrand)}</button>` : ''}
+                        ${state.selectedModel ? `<span class="text-slate-300">/</span> <button onclick="selectModel(null)" class="hover:text-blue-600 font-medium">${getModelName(state.selectedModel)}</button>` : ''}
+                        ${state.selectedCategory ? `<span class="text-slate-300">/</span> <span class="text-slate-900 font-semibold">${getCategoryName(state.selectedCategory)}</span>` : ''}
+                    </nav>
+
+                    ${state.searchQuery.trim() !== '' ? renderSearchResults() : renderBrowseFlow()}
+                </main>
+
+                <!-- Footer Informasi -->
+                <footer class="bg-white border-t border-slate-200 mt-12 py-8 text-sm text-slate-600">
+                    <div class="max-w-7xl mx-auto px-4 grid grid-cols-1 md:grid-cols-3 gap-6">
+                        <div>
+                            <h3 class="font-bold text-slate-900 text-base mb-2 uppercase">${state.settings.storeName}</h3>
+                            <p class="text-slate-500 text-xs leading-relaxed">${state.settings.tagline}</p>
+                        </div>
+                        <div>
+                            <h4 class="font-semibold text-slate-900 mb-2">Alamat Toko</h4>
+                            <p class="text-slate-500 text-xs leading-relaxed"><i class="fa-solid fa-location-dot text-red-500 mr-1"></i> ${state.settings.address}</p>
+                        </div>
+                        <div>
+                            <h4 class="font-semibold text-slate-900 mb-2">Layanan Cepat WhatsApp</h4>
+                            <a href="https://wa.me/${normalizedWA}" target="_blank" class="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-xl text-xs font-semibold transition"><i class="fa-brands fa-whatsapp text-base"></i> ${state.settings.whatsapp}</a>
+                        </div>
+                    </div>
+                </footer>
+            `;
+        }
+
+        function renderBrowseFlow() {
+            if (state.selectedProduct) {
+                return renderProductDetail();
+            } else if (state.selectedCategory) {
+                return renderProductList();
+            } else if (state.selectedModel) {
+                return renderCategoryList();
+            } else if (state.selectedBrand) {
+                return renderModelList();
+            } else {
+                return renderBrandGrid();
+            }
+        }
+
+        // 1. BRAND GRID
+        function renderBrandGrid() {
+            const activeBrands = state.brands.filter(b => b.status !== 'nonaktif').sort((a,b) => (a.urutan || 0) - (b.urutan || 0));
+            if (activeBrands.length === 0) {
+                return `
+                    <div class="text-center py-20 bg-white rounded-2xl border border-slate-200 p-8 shadow-xs">
+                        <div class="w-16 h-16 bg-blue-50 text-blue-600 rounded-full flex items-center justify-center mx-auto mb-4 text-2xl"><i class="fa-solid fa-mobile-screen"></i></div>
+                        <h2 class="text-lg font-bold text-slate-800 mb-1">Belum ada sparepart tersedia.</h2>
+                        <p class="text-sm text-slate-500">Admin dapat menambahkan data brand melalui panel Admin.</p>
+                    </div>
+                `;
+            }
+
+            return `
+                <div class="mb-6">
+                    <h2 class="text-xl font-bold text-slate-900 mb-1">Pilih Brand Smartphone / Laptop</h2>
+                    <p class="text-sm text-slate-500">Silakan pilih brand perangkat yang ingin Anda servis atau cari sparepart-nya.</p>
+                </div>
+                <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
+                    ${activeBrands.map(brand => `
+                        <div onclick="selectBrand(${brand.id})" class="bg-white hover:border-blue-500 border border-slate-200 rounded-2xl p-5 flex flex-col items-center justify-center text-center cursor-pointer transition hover:shadow-md group">
+                            <div class="w-16 h-16 mb-3 flex items-center justify-center bg-slate-50 rounded-xl group-hover:scale-105 transition overflow-hidden">
+                                ${brand.logo ? `<img src="${brand.logo}" class="w-full h-full object-contain">` : `<i class="fa-solid fa-mobile text-2xl text-slate-400"></i>`}
+                            </div>
+                            <span class="font-semibold text-sm text-slate-800 group-hover:text-blue-600 transition">${brand.nama}</span>
+                            <span class="text-[10px] text-slate-400 mt-0.5">${brand.logo ? '' : 'Logo belum tersedia'}</span>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
+        }
+
+        // 2. MODEL LIST
+        function renderModelList() {
+            const models = state.models.filter(m => m.brandId == state.selectedBrand && m.status !== 'nonaktif').sort((a,b) => (a.urutan || 0) - (b.urutan || 0));
+            const brand = state.brands.find(b => b.id == state.selectedBrand);
+
+            return `
+                <div class="mb-6 flex items-center justify-between">
+                    <div>
+                        <h2 class="text-xl font-bold text-slate-900 mb-1">Brand: ${brand ? brand.nama : ''}</h2>
+                        <p class="text-sm text-slate-500">Pilih model perangkat untuk melihat jenis sparepart.</p>
+                    </div>
+                    <button onclick="selectBrand(null)" class="text-sm text-blue-600 hover:underline font-semibold"><i class="fa-solid fa-arrow-left mr-1"></i> Kembali ke Brand</button>
+                </div>
+                ${models.length === 0 ? `
+                    <div class="text-center py-16 bg-white rounded-2xl border border-slate-200 p-8">
+                        <p class="text-slate-500 font-medium">Belum ada model untuk brand ini.</p>
+                    </div>
+                ` : `
+                    <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
+                        ${models.map(m => `
+                            <div onclick="selectModel(${m.id})" class="bg-white hover:border-blue-500 border border-slate-200 rounded-2xl p-4 flex flex-col items-center text-center cursor-pointer transition hover:shadow-md group">
+                                <div class="w-20 h-20 bg-slate-50 rounded-xl mb-3 flex items-center justify-center overflow-hidden">
+                                    ${m.foto ? `<img src="${m.foto}" class="w-full h-full object-contain">` : `<i class="fa-solid fa-tablet-screen-button text-3xl text-slate-300"></i>`}
+                                </div>
+                                <h3 class="font-bold text-sm text-slate-800 group-hover:text-blue-600 transition">${m.namaModel}</h3>
+                                ${m.deskripsi ? `<p class="text-xs text-slate-400 mt-1 line-clamp-1">${m.deskripsi}</p>` : ''}
+                            </div>
+                        `).join('')}
+                    </div>
+                `}
+            `;
+        }
+
+        // 3. CATEGORY (JENIS SPAREPART) LIST
+        function renderCategoryList() {
+            const categories = state.categories.filter(c => c.status !== 'nonaktif').sort((a,b) => (a.urutan || 0) - (b.urutan || 0));
+            const brand = state.brands.find(b => b.id == state.selectedBrand);
+            const model = state.models.find(m => m.id == state.selectedModel);
+
+            return `
+                <div class="mb-6 flex items-center justify-between">
+                    <div>
+                        <h2 class="text-xl font-bold text-slate-900 mb-1">${brand?.nama} - ${model?.namaModel}</h2>
+                        <p class="text-sm text-slate-500">Pilih jenis sparepart yang Anda cari.</p>
+                    </div>
+                    <button onclick="selectModel(null)" class="text-sm text-blue-600 hover:underline font-semibold"><i class="fa-solid fa-arrow-left mr-1"></i> Kembali ke Model</button>
+                </div>
+                ${categories.length === 0 ? `
+                    <div class="text-center py-16 bg-white rounded-2xl border border-slate-200 p-8">
+                        <p class="text-slate-500 font-medium">Belum ada jenis sparepart aktif.</p>
+                    </div>
+                ` : `
+                    <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
+                        ${categories.map(cat => `
+                            <div onclick="selectCategory(${cat.id})" class="bg-white hover:border-blue-500 border border-slate-200 rounded-2xl p-4 flex flex-col items-center text-center cursor-pointer transition hover:shadow-md group">
+                                <div class="w-16 h-16 bg-slate-50 rounded-xl mb-3 flex items-center justify-center overflow-hidden">
+                                    ${cat.foto ? `<img src="${cat.foto}" class="w-full h-full object-contain">` : `<i class="fa-solid fa-gear text-2xl text-slate-300"></i>`}
+                                </div>
+                                <h3 class="font-bold text-sm text-slate-800 group-hover:text-blue-600 transition">${cat.namaJenis}</h3>
+                                <span class="text-[10px] text-slate-400 mt-0.5">${cat.foto ? '' : 'Foto belum tersedia'}</span>
+                            </div>
+                        `).join('')}
+                    </div>
+                `}
+            `;
+        }
+
+        // 4. PRODUCT LIST
+        function renderProductList() {
+            const brand = state.brands.find(b => b.id == state.selectedBrand);
+            const model = state.models.find(m => m.id == state.selectedModel);
+            const category = state.categories.find(c => c.id == state.selectedCategory);
+
+            let products = state.products.filter(p => p.brandId == state.selectedBrand && p.modelId == state.selectedModel && p.categoryId == state.selectedCategory);
+
+            // Filter tambahan jika ada
+            if (state.filterGrade) products = products.filter(p => p.gradeId == state.filterGrade);
+            if (state.filterStatus) products = products.filter(p => p.status === state.filterStatus);
+
+            // Sorting
+            products.sort((a,b) => {
+                if (state.sortBy === 'terbaru') return new Date(b.createdAt) - new Date(a.createdAt);
+                if (state.sortBy === 'az') return a.namaSparepart.localeCompare(b.namaSparepart);
+                if (state.sortBy === 'za') return b.namaSparepart.localeCompare(a.namaSparepart);
+                if (state.sortBy === 'termurah') return Number(a.harga) - Number(b.harga);
+                if (state.sortBy === 'termahal') return Number(b.harga) - Number(a.harga);
+                return 0;
+            });
+
+            return `
+                <div class="mb-6 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                    <div>
+                        <h2 class="text-xl font-bold text-slate-900 mb-1">${brand?.nama} &gt; ${model?.namaModel} &gt; ${category?.namaJenis}</h2>
+                        <p class="text-sm text-slate-500">Daftar pilihan grade dan harga sparepart.</p>
+                    </div>
+                    <button onclick="selectCategory(null)" class="text-sm text-blue-600 hover:underline font-semibold"><i class="fa-solid fa-arrow-left mr-1"></i> Kembali ke Jenis Sparepart</button>
+                </div>
+
+                <!-- Filter & Sorting Bar -->
+                <div class="bg-white p-4 rounded-2xl border border-slate-200 mb-6 flex flex-wrap gap-3 items-center justify-between">
+                    <div class="flex flex-wrap gap-2 items-center w-full md:w-auto">
+                        <select onchange="state.filterGrade = this.value; render();" class="bg-slate-100 border-none rounded-xl px-3 py-2 text-xs font-medium focus:ring-2 focus:ring-blue-500">
+                            <option value="">Semua Grade</option>
+                            ${state.grades.map(g => `<option value="${g.id}" ${state.filterGrade == g.id ? 'selected' : ''}>${g.namaGrade}</option>`).join('')}
+                        </select>
+                        <select onchange="state.filterStatus = this.value; render();" class="bg-slate-100 border-none rounded-xl px-3 py-2 text-xs font-medium focus:ring-2 focus:ring-blue-500">
+                            <option value="">Semua Status</option>
+                            <option value="Tersedia" ${state.filterStatus === 'Tersedia' ? 'selected' : ''}>Tersedia</option>
+                            <option value="Stok Terbatas" ${state.filterStatus === 'Stok Terbatas' ? 'selected' : ''}>Stok Terbatas</option>
+                            <option value="Habis" ${state.filterStatus === 'Habis' ? 'selected' : ''}>Habis</option>
+                        </select>
+                    </div>
+                    <div class="flex items-center gap-2 w-full md:w-auto justify-end">
+                        <span class="text-xs text-slate-500">Urutkan:</span>
+                        <select onchange="state.sortBy = this.value; render();" class="bg-slate-100 border-none rounded-xl px-3 py-2 text-xs font-medium focus:ring-2 focus:ring-blue-500">
+                            <option value="terbaru" ${state.sortBy === 'terbaru' ? 'selected' : ''}>Terbaru</option>
+                            <option value="az" ${state.sortBy === 'az' ? 'selected' : ''}>A-Z</option>
+                            <option value="za" ${state.sortBy === 'za' ? 'selected' : ''}>Z-A</option>
+                            <option value="termurah" ${state.sortBy === 'termurah' ? 'selected' : ''}>Harga Termurah</option>
+                            <option value="termahal" ${state.sortBy === 'termahal' ? 'selected' : ''}>Harga Termahal</option>
+                        </select>
+                    </div>
+                </div>
+
+                ${products.length === 0 ? `
+                    <div class="text-center py-16 bg-white rounded-2xl border border-slate-200 p-8">
+                        <p class="text-slate-500 font-medium">Sparepart tidak ditemukan.</p>
+                    </div>
+                ` : `
+                    <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6">
+                        ${products.map(p => {
+                            const gradeObj = state.grades.find(g => g.id == p.gradeId);
+                            const statusColor = p.status === 'Tersedia' ? 'bg-emerald-100 text-emerald-800' : p.status === 'Stok Terbatas' ? 'bg-amber-100 text-amber-800' : 'bg-red-100 text-red-800';
+                            return `
+                                <div onclick="selectProduct(${p.id})" class="bg-white border border-slate-200 rounded-2xl p-5 flex flex-col justify-between cursor-pointer hover:border-blue-500 transition hover:shadow-md group">
+                                    <div>
+                                        <div class="w-full h-48 bg-slate-50 rounded-xl mb-4 overflow-hidden flex items-center justify-center">
+                                            ${p.foto ? `<img src="${p.foto}" class="w-full h-full object-cover group-hover:scale-105 transition">` : `<i class="fa-solid fa-image text-4xl text-slate-300"></i>`}
+                                        </div>
+                                        <div class="flex items-center justify-between mb-2">
+                                            <span class="text-xs font-bold uppercase tracking-wider text-blue-600 bg-blue-50 px-2.5 py-1 rounded-lg">${gradeObj ? gradeObj.namaGrade : 'Standard'}</span>
+                                            <span class="text-[10px] font-bold px-2 py-0.5 rounded-full ${statusColor}">${p.status}</span>
+                                        </div>
+                                        <h3 class="font-bold text-base text-slate-900 group-hover:text-blue-600 transition mb-1">${p.namaSparepart}</h3>
+                                        <p class="text-xs text-slate-500 line-clamp-2 mb-4">${p.deskripsi || 'Tidak ada deskripsi.'}</p>
+                                    </div>
+                                    <div class="flex items-center justify-between pt-4 border-t border-slate-100">
+                                        <span class="text-lg font-extrabold text-slate-900">${formatRupiah(p.harga)}</span>
+                                        <span class="text-xs font-semibold text-blue-600 group-hover:translate-x-1 transition flex items-center gap-1">Detail <i class="fa-solid fa-chevron-right text-[10px]"></i></span>
+                                    </div>
+                                </div>
+                            `;
+                        }).join('')}
+                    </div>
+                `}
+            `;
+        }
+
+        // 5. DETAIL PRODUK & WHATSAPP
+        function renderProductDetail() {
+            const product = state.products.find(p => p.id == state.selectedProduct);
+            if (!product) return '';
+
+            const brand = state.brands.find(b => b.id == product.brandId);
+            const model = state.models.find(m => m.id == product.modelId);
+            const category = state.categories.find(c => c.id == product.categoryId);
+            const grade = state.grades.find(g => g.id == product.gradeId);
+
+            const statusColor = product.status === 'Tersedia' ? 'bg-emerald-100 text-emerald-800' : product.status === 'Stok Terbatas' ? 'bg-amber-100 text-amber-800' : 'bg-red-100 text-red-800';
+
+            const waText = encodeURIComponent(`Halo DONETECH, saya ingin menanyakan sparepart:\nBrand: ${brand?.nama}\nModel: ${model?.namaModel}\nJenis: ${category?.namaJenis}\nGrade: ${grade?.namaGrade || '-'}\nHarga: ${formatRupiah(product.harga)}\nApakah sparepart tersebut masih tersedia?`);
+            const waNumberClean = state.settings.whatsapp.replace(/[^0-9]/g, '');
+            const normalizedWA = waNumberClean.startsWith('0') ? '62' + waNumberClean.slice(1) : waNumberClean;
+
+            return `
+                <div class="mb-6">
+                    <button onclick="selectProduct(null)" class="text-sm text-blue-600 hover:underline font-semibold"><i class="fa-solid fa-arrow-left mr-1"></i> Kembali ke Daftar Produk</button>
+                </div>
+                <div class="bg-white rounded-3xl border border-slate-200 overflow-hidden shadow-sm grid grid-cols-1 md:grid-cols-2 gap-8 p-6 md:p-8">
+                    <div class="w-full h-80 md:h-[400px] bg-slate-50 rounded-2xl overflow-hidden flex items-center justify-center border border-slate-100">
+                        ${product.foto ? `<img src="${product.foto}" class="w-full h-full object-contain">` : `<i class="fa-solid fa-image text-6xl text-slate-300"></i>`}
+                    </div>
+                    <div class="flex flex-col justify-between">
+                        <div>
+                            <div class="flex items-center gap-2 mb-3">
+                                <span class="text-xs font-bold uppercase tracking-wider text-blue-600 bg-blue-50 px-3 py-1 rounded-lg">${grade ? grade.namaGrade : 'Standard'}</span>
+                                <span class="text-xs font-bold px-3 py-1 rounded-full ${statusColor}">${product.status}</span>
+                            </div>
+                            <h2 class="text-2xl md:text-3xl font-extrabold text-slate-900 mb-2">${product.namaSparepart}</h2>
+                            <p class="text-sm text-slate-500 mb-6">${product.deskripsi || 'Tidak ada deskripsi detail untuk produk ini.'}</p>
+
+                            <div class="bg-slate-50 rounded-2xl p-4 space-y-3 mb-6 text-sm">
+                                <div class="flex justify-between border-b border-slate-200/60 pb-2"><span class="text-slate-500 font-medium">Brand</span><span class="font-bold text-slate-800">${brand?.nama}</span></div>
+                                <div class="flex justify-between border-b border-slate-200/60 pb-2"><span class="text-slate-500 font-medium">Model</span><span class="font-bold text-slate-800">${model?.namaModel}</span></div>
+                                <div class="flex justify-between border-b border-slate-200/60 pb-2"><span class="text-slate-500 font-medium">Jenis Sparepart</span><span class="font-bold text-slate-800">${category?.namaJenis}</span></div>
+                                <div class="flex justify-between"><span class="text-slate-500 font-medium">Harga</span><span class="font-extrabold text-blue-600 text-lg">${formatRupiah(product.harga)}</span></div>
+                            </div>
+                        </div>
+
+                        <a href="https://wa.me/${normalizedWA}?text=${waText}" target="_blank" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-4 px-6 rounded-2xl transition flex items-center justify-center gap-3 text-base shadow-lg shadow-emerald-600/2anc">
+                            <i class="fa-brands fa-whatsapp text-2xl"></i> TANYA VIA WHATSAPP
+                        </a>
+                    </div>
+                </div>
+            `;
+        }
+
+        // 6. SEARCH RESULTS (REALTIME GLOBAL SEARCH)
+        function renderSearchResults() {
+            const query = state.searchQuery.toLowerCase();
+            const results = state.products.filter(p => {
+                const brand = state.brands.find(b => b.id == p.brandId)?.nama.toLowerCase() || '';
+                const model = state.models.find(m => m.id == p.modelId)?.namaModel.toLowerCase() || '';
+                const category = state.categories.find(c => c.id == p.categoryId)?.namaJenis.toLowerCase() || '';
+                const grade = state.grades.find(g => g.id == p.gradeId)?.namaGrade.toLowerCase() || '';
+                const name = p.namaSparepart.toLowerCase();
+                const desc = (p.deskripsi || '').toLowerCase();
+
+                return brand.includes(query) || model.includes(query) || category.includes(query) || grade.includes(query) || name.includes(query) || desc.includes(query);
+            });
+
+            return `
+                <div class="mb-6">
+                    <h2 class="text-xl font-bold text-slate-900 mb-1">Hasil Pencarian: "${state.searchQuery}"</h2>
+                    <p class="text-sm text-slate-500">Ditemukan ${results.length} sparepart yang cocok.</p>
+                </div>
+                ${results.length === 0 ? `
+                    <div class="text-center py-16 bg-white rounded-2xl border border-slate-200 p-8">
+                        <p class="text-slate-500 font-medium">Sparepart tidak ditemukan.</p>
+                    </div>
+                ` : `
+                    <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6">
+                        ${results.map(p => {
+                            const gradeObj = state.grades.find(g => g.id == p.gradeId);
+                            const statusColor = p.status === 'Tersedia' ? 'bg-emerald-100 text-emerald-800' : p.status === 'Stok Terbatas' ? 'bg-amber-100 text-amber-800' : 'bg-red-100 text-red-800';
+                            return `
+                                <div onclick="selectProduct(${p.id})" class="bg-white border border-slate-200 rounded-2xl p-5 flex flex-col justify-between cursor-pointer hover:border-blue-500 transition hover:shadow-md group">
+                                    <div>
+                                        <div class="w-full h-48 bg-slate-50 rounded-xl mb-4 overflow-hidden flex items-center justify-center">
+                                            ${p.foto ? `<img src="${p.foto}" class="w-full h-full object-cover group-hover:scale-105 transition">` : `<i class="fa-solid fa-image text-4xl text-slate-300"></i>`}
+                                        </div>
+                                        <div class="flex items-center justify-between mb-2">
+                                            <span class="text-xs font-bold uppercase tracking-wider text-blue-600 bg-blue-50 px-2.5 py-1 rounded-lg">${gradeObj ? gradeObj.namaGrade : 'Standard'}</span>
+                                            <span class="text-[10px] font-bold px-2 py-0.5 rounded-full ${statusColor}">${p.status}</span>
+                                        </div>
+                                        <h3 class="font-bold text-base text-slate-900 group-hover:text-blue-600 transition mb-1">${p.namaSparepart}</h3>
+                                        <p class="text-xs text-slate-500 line-clamp-2 mb-4">${p.deskripsi || 'Tidak ada deskripsi.'}</p>
+                                    </div>
+                                    <div class="flex items-center justify-between pt-4 border-t border-slate-100">
+                                        <span class="text-lg font-extrabold text-slate-900">${formatRupiah(p.harga)}</span>
+                                        <span class="text-xs font-semibold text-blue-600 group-hover:translate-x-1 transition flex items-center gap-1">Detail <i class="fa-solid fa-chevron-right text-[10px]"></i></span>
+                                    </div>
+                                </div>
+                            `;
+                        }).join('')}
+                    </div>
+                `}
+            `;
+        }
+
+        // --- NAVIGATION HANDLERS ---
+        function selectBrand(id) {
+            state.selectedBrand = id;
+            state.selectedModel = null;
+            state.selectedCategory = null;
+            state.selectedProduct = null;
+            render();
+        }
+        function selectModel(id) {
+            state.selectedModel = id;
+            state.selectedCategory = null;
+            state.selectedProduct = null;
+            render();
+        }
+        function selectCategory(id) {
+            state.selectedCategory = id;
+            state.selectedProduct = null;
+            render();
+        }
+        function selectProduct(id) {
+            state.selectedProduct = id;
+            render();
+        }
+        function resetCustomerNav() {
+            state.selectedBrand = null;
+            state.selectedModel = null;
+            state.selectedCategory = null;
+            state.selectedProduct = null;
+            state.searchQuery = '';
+            render();
+        }
+        function handleGlobalSearch(val) {
+            state.searchQuery = val;
+            render();
+        }
+
+
+        // --- ADMIN VIEW COMPONENTS ---
+        function renderAdminView() {
+            return `
+                <div class="min-h-screen flex flex-col md:flex-row">
+                    <!-- Sidebar Admin -->
+                    <aside class="w-full md:w-64 bg-slate-900 text-slate-300 flex flex-col justify-between">
+                        <div>
+                            <div class="p-6 border-b border-slate-800 flex items-center justify-between">
+                                <h2 class="font-bold text-white text-base uppercase"><i class="fa-solid fa-screwdriver-wrench text-blue-500 mr-2"></i>Admin Panel</h2>
+                                <button onclick="logoutAdmin()" class="text-slate-400 hover:text-white text-xs"><i class="fa-solid fa-right-from-bracket"></i></button>
+                            </div>
+                            <nav class="p-4 space-y-1">
+                                <button onclick="setAdminTab('dashboard')" class="w-full flex items-center gap-3 px-4 py-2.5 rounded-xl text-sm font-medium transition ${state.adminTab === 'dashboard' ? 'bg-blue-600 text-white' : 'hover:bg-slate-800 text-slate-400 hover:text-white'}"><i class="fa-solid fa-chart-pie w-5"></i> Dashboard</button>
+                                <button onclick="setAdminTab('brands')" class="w-full flex items-center gap-3 px-4 py-2.5 rounded-xl text-sm font-medium transition ${state.adminTab === 'brands' ? 'bg-blue-600 text-white' : 'hover:bg-slate-800 text-slate-400 hover:text-white'}"><i class="fa-solid fa-mobile w-5"></i> Kelola Brand</button>
+                                <button onclick="setAdminTab('models')" class="w-full flex items-center gap-3 px-4 py-2.5 rounded-xl text-sm font-medium transition ${state.adminTab === 'models' ? 'bg-blue-600 text-white' : 'hover:bg-slate-800 text-slate-400 hover:text-white'}"><i class="fa-solid fa-tablet-screen-button w-5"></i> Kelola Model</button>
+                                <button onclick="setAdminTab('categories')" class="w-full flex items-center gap-3 px-4 py-2.5 rounded-xl text-sm font-medium transition ${state.adminTab === 'categories' ? 'bg-blue-600 text-white' : 'hover:bg-slate-800 text-slate-400 hover:text-white'}"><i class="fa-solid fa-list w-5"></i> Jenis Sparepart</button>
+                                <button onclick="setAdminTab('grades')" class="w-full flex items-center gap-3 px-4 py-2.5 rounded-xl text-sm font-medium transition ${state.adminTab === 'grades' ? 'bg-blue-600 text-white' : 'hover:bg-slate-800 text-slate-400 hover:text-white'}"><i class="fa-solid fa-layer-group w-5"></i> Kelola Grade</button>
+                                <button onclick="setAdminTab('products')" class="w-full flex items-center gap-3 px-4 py-2.5 rounded-xl text-sm font-medium transition ${state.adminTab === 'products' ? 'bg-blue-600 text-white' : 'hover:bg-slate-800 text-slate-400 hover:text-white'}"><i class="fa-solid fa-boxes-stacked w-5"></i> Kelola Produk</button>
+                                <button onclick="setAdminTab('settings')" class="w-full flex items-center gap-3 px-4 py-2.5 rounded-xl text-sm font-medium transition ${state.adminTab === 'settings' ? 'bg-blue-600 text-white' : 'hover:bg-slate-800 text-slate-400 hover:text-white'}"><i class="fa-solid fa-gear w-5"></i> Pengaturan Toko</button>
+                                <button onclick="setAdminTab('backup')" class="w-full flex items-center gap-3 px-4 py-2.5 rounded-xl text-sm font-medium transition ${state.adminTab === 'backup' ? 'bg-blue-600 text-white' : 'hover:bg-slate-800 text-slate-400 hover:text-white'}"><i class="fa-solid fa-database w-5"></i> Backup &amp; Restore</button>
+                            </nav>
+                        </div>
+                        <div class="p-4 border-t border-slate-800">
+                            <button onclick="state.view = 'customer'; render();" class="w-full bg-slate-800 hover:bg-slate-700 text-white px-4 py-2.5 rounded-xl text-xs font-semibold transition flex items-center justify-center gap-2"><i class="fa-solid fa-globe"></i> Lihat Website Customer</button>
+                        </div>
+                    </aside>
+
+                    <!-- Main Content Admin -->
+                    <main class="flex-1 p-6 md:p-10 overflow-y-auto">
+                        ${renderAdminContent()}
+                    </main>
+                </div>
+            `;
+        }
+
+        function setAdminTab(tab) {
+            state.adminTab = tab;
+            render();
+        }
+
+        function renderAdminContent() {
+            switch(state.adminTab) {
+                case 'dashboard': return renderAdminDashboard();
+                case 'brands': return renderAdminBrands();
+                case 'models': return renderAdminModels();
+                case 'categories': return renderAdminCategories();
+                case 'grades': return renderAdminGrades();
+                case 'products': return renderAdminProducts();
+                case 'settings': return renderAdminSettings();
+                case 'backup': return renderAdminBackup();
+                default: return '';
+            }
+        }
+
+        // --- ADMIN DASHBOARD ---
+        function renderAdminDashboard() {
+            const totalBrands = state.brands.length;
+            const totalModels = state.models.length;
+            const totalCategories = state.categories.length;
+            const totalProducts = state.products.length;
+            const availableProducts = state.products.filter(p => p.status === 'Tersedia').length;
+            const limitedProducts = state.products.filter(p => p.status === 'Stok Terbatas').length;
+            const emptyProducts = state.products.filter(p => p.status === 'Habis').length;
+
+            return `
+                <div class="mb-8">
+                    <h2 class="text-2xl font-bold text-slate-900 mb-1">Dashboard Admin</h2>
+                    <p class="text-sm text-slate-500">Ringkasan statistik katalog sparepart DONETECH.</p>
+                </div>
+                <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-6 mb-8">
+                    <div class="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs"><span class="text-xs font-semibold text-slate-400 block mb-1">Total Brand</span><span class="text-3xl font-extrabold text-slate-900">${totalBrands}</span></div>
+                    <div class="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs"><span class="text-xs font-semibold text-slate-400 block mb-1">Total Model</span><span class="text-3xl font-extrabold text-slate-900">${totalModels}</span></div>
+                    <div class="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs"><span class="text-xs font-semibold text-slate-400 block mb-1">Jenis Sparepart</span><span class="text-3xl font-extrabold text-slate-900">${totalCategories}</span></div>
+                    <div class="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs"><span class="text-xs font-semibold text-slate-400 block mb-1">Total Produk</span><span class="text-3xl font-extrabold text-slate-900">${totalProducts}</span></div>
+                </div>
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-6">
+                    <div class="bg-emerald-50 border border-emerald-200 p-6 rounded-2xl"><span class="text-xs font-bold text-emerald-800 block mb-1">Produk Tersedia</span><span class="text-3xl font-extrabold text-emerald-900">${availableProducts}</span></div>
+                    <div class="bg-amber-50 border border-amber-200 p-6 rounded-2xl"><span class="text-xs font-bold text-amber-800 block mb-1">Stok Terbatas</span><span class="text-3xl font-extrabold text-amber-900">${limitedProducts}</span></div>
+                    <div class="bg-red-50 border border-red-200 p-6 rounded-2xl"><span class="text-xs font-bold text-red-800 block mb-1">Produk Habis</span><span class="text-3xl font-extrabold text-red-900">${emptyProducts}</span></div>
+                </div>
+            `;
+        }
+
+        // --- ADMIN BRANDS CRUD ---
+        function renderAdminBrands() {
+            return `
+                <div class="flex justify-between items-center mb-8">
+                    <div>
+                        <h2 class="text-2xl font-bold text-slate-900 mb-1">Kelola Brand</h2>
+                        <p class="text-sm text-slate-500">Tambah, edit, atau hapus brand perangkat.</p>
+                    </div>
+                    <button onclick="openBrandModal()" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-xl text-sm font-semibold transition flex items-center gap-2"><i class="fa-solid fa-plus"></i> Tambah Brand</button>
+                </div>
+                <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-xs">
+                    <table class="w-full text-left border-collapse">
+                        <thead>
+                            <tr class="bg-slate-50 border-b border-slate-200 text-xs text-slate-500 uppercase">
+                                <th class="p-4">Logo</th>
+                                <th class="p-4">Nama Brand</th>
+                                <th class="p-4">Urutan</th>
+                                <th class="p-4">Status</th>
+                                <th class="p-4 text-right">Aksi</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-100 text-sm">
+                            ${state.brands.length === 0 ? `<tr><td colspan="5" class="p-6 text-center text-slate-400">Belum ada data brand.</td></tr>` : state.brands.map(b => `
+                                <tr>
+                                    <td class="p-4"><div class="w-10 h-10 bg-slate-50 rounded-lg flex items-center justify-center overflow-hidden border">${b.logo ? `<img src="${b.logo}" class="w-full h-full object-contain">` : `<i class="fa-solid fa-mobile text-slate-300"></i>`}</div></td>
+                                    <td class="p-4 font-bold text-slate-800">${b.nama}</td>
+                                    <td class="p-4 text-slate-500">${b.urutan || 0}</td>
+                                    <td class="p-4"><span class="px-2.5 py-1 rounded-full text-xs font-semibold ${b.status === 'nonaktif' ? 'bg-red-100 text-red-800' : 'bg-emerald-100 text-emerald-800'}">${b.status || 'Aktif'}</span></td>
+                                    <td class="p-4 text-right space-x-2">
+                                        <button onclick="openBrandModal(${b.id})" class="text-blue-600 hover:underline font-semibold text-xs">Edit</button>
+                                        <button onclick="deleteBrandItem(${b.id})" class="text-red-600 hover:underline font-semibold text-xs">Hapus</button>
+                                    </td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Brand Modal -->
+                <div id="brandModal" class="fixed inset-0 bg-black/60 z-50 hidden flex items-center justify-center p-4">
+                    <div class="bg-white rounded-2xl w-full max-w-lg p-6 shadow-2xl">
+                        <h3 id="brandModalTitle" class="text-xl font-bold text-slate-900 mb-4">Tambah Brand</h3>
+                        <form onsubmit="saveBrand(event)" class="space-y-4">
+                            <input type="hidden" id="brandId">
+                            <div>
+                                <label class="block text-sm font-medium text-slate-700 mb-1">Nama Brand *</label>
+                                <input type="text" id="brandNama" required class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-slate-700 mb-1">Logo Brand (Opsional)</label>
+                                <input type="file" id="brandLogoFile" accept="image/*" onchange="previewImage(this, 'brandLogoPreview', 'brandLogoInput')" class="w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100">
+                                <input type="hidden" id="brandLogoInput">
+                                <div id="brandLogoPreviewContainer" class="mt-2 hidden"><img id="brandLogoPreview" class="w-16 h-16 object-contain border rounded-lg"></div>
+                            </div>
+                            <div class="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label class="block text-sm font-medium text-slate-700 mb-1">Urutan</label>
+                                    <input type="number" id="brandUrutan" value="0" class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-slate-700 mb-1">Status</label>
+                                    <select id="brandStatus" class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                                        <option value="aktif">Aktif</option>
+                                        <option value="nonaktif">Nonaktif</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="flex justify-end gap-3 pt-4 border-t">
+                                <button type="button" onclick="closeBrandModal()" class="px-4 py-2 text-slate-600 font-semibold text-sm">Batal</button>
+                                <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2 rounded-xl text-sm font-semibold">Simpan</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            `;
+        }
+
+        function openBrandModal(id = null) {
+            document.getElementById('brandModal').classList.remove('hidden');
+            if (id) {
+                const b = state.brands.find(x => x.id == id);
+                document.getElementById('brandModalTitle').innerText = 'Edit Brand';
+                document.getElementById('brandId').value = b.id;
+                document.getElementById('brandNama').value = b.nama;
+                document.getElementById('brandUrutan').value = b.urutan || 0;
+                document.getElementById('brandStatus').value = b.status || 'aktif';
+                document.getElementById('brandLogoInput').value = b.logo || '';
+                if (b.logo) {
+                    document.getElementById('brandLogoPreview').src = b.logo;
+                    document.getElementById('brandLogoPreviewContainer').classList.remove('hidden');
+                } else {
+                    document.getElementById('brandLogoPreviewContainer').classList.add('hidden');
+                }
+            } else {
+                document.getElementById('brandModalTitle').innerText = 'Tambah Brand';
+                document.getElementById('brandId').value = '';
+                document.getElementById('brandNama').value = '';
+                document.getElementById('brandUrutan').value = '0';
+                document.getElementById('brandStatus').value = 'aktif';
+                document.getElementById('brandLogoInput').value = '';
+                document.getElementById('brandLogoPreviewContainer').classList.add('hidden');
+            }
+        }
+        function closeBrandModal() { document.getElementById('brandModal').classList.add('hidden'); }
+
+        async function saveBrand(e) {
+            e.preventDefault();
+            const id = document.getElementById('brandId').value;
+            const data = {
+                nama: document.getElementById('brandNama').value,
+                logo: document.getElementById('brandLogoInput').value,
+                urutan: Number(document.getElementById('brandUrutan').value),
+                status: document.getElementById('brandStatus').value
+            };
+            if (id) {
+                data.id = Number(id);
+                await updateRecord('brands', data);
+            } else {
+                await addRecord('brands', data);
+            }
+            state.brands = await getAll('brands');
+            closeBrandModal();
+            render();
+        }
+
+        async function deleteBrandItem(id) {
+            const relatedModels = state.models.filter(m => m.brandId == id);
+            if (relatedModels.length > 0) {
+                alert('Brand ini masih memiliki model terkait! Hapus atau pindahkan model terlebih dahulu.');
+                return;
+            }
+            if (confirm('Apakah Anda yakin ingin menghapus brand ini?')) {
+                await deleteRecord('brands', id);
+                state.brands = await getAll('brands');
+                render();
+            }
+        }
+
+
+        // --- ADMIN MODELS CRUD ---
+        function renderAdminModels() {
+            return `
+                <div class="flex justify-between items-center mb-8">
+                    <div>
+                        <h2 class="text-2xl font-bold text-slate-900 mb-1">Kelola Model</h2>
+                        <p class="text-sm text-slate-500">Tambah, edit, atau hapus model perangkat.</p>
+                    </div>
+                    <button onclick="openModelModal()" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-xl text-sm font-semibold transition flex items-center gap-2"><i class="fa-solid fa-plus"></i> Tambah Model</button>
+                </div>
+                <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-xs">
+                    <table class="w-full text-left border-collapse">
+                        <thead>
+                            <tr class="bg-slate-50 border-b border-slate-200 text-xs text-slate-500 uppercase">
+                                <th class="p-4">Foto</th>
+                                <th class="p-4">Brand</th>
+                                <th class="p-4">Nama Model</th>
+                                <th class="p-4">Urutan</th>
+                                <th class="p-4">Status</th>
+                                <th class="p-4 text-right">Aksi</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-100 text-sm">
+                            ${state.models.length === 0 ? `<tr><td colspan="6" class="p-6 text-center text-slate-400">Belum ada data model.</td></tr>` : state.models.map(m => {
+                                const brand = state.brands.find(b => b.id == m.brandId);
+                                return `
+                                    <tr>
+                                        <td class="p-4"><div class="w-10 h-10 bg-slate-50 rounded-lg flex items-center justify-center overflow-hidden border">${m.foto ? `<img src="${m.foto}" class="w-full h-full object-contain">` : `<i class="fa-solid fa-tablet-screen-button text-slate-300"></i>`}</div></td>
+                                        <td class="p-4 font-semibold text-slate-600">${brand ? brand.nama : '-'}</td>
+                                        <td class="p-4 font-bold text-slate-800">${m.namaModel}</td>
+                                        <td class="p-4 text-slate-500">${m.urutan || 0}</td>
+                                        <td class="p-4"><span class="px-2.5 py-1 rounded-full text-xs font-semibold ${m.status === 'nonaktif' ? 'bg-red-100 text-red-800' : 'bg-emerald-100 text-emerald-800'}">${m.status || 'Aktif'}</span></td>
+                                        <td class="p-4 text-right space-x-2">
+                                            <button onclick="openModelModal(${m.id})" class="text-blue-600 hover:underline font-semibold text-xs">Edit</button>
+                                            <button onclick="deleteModelItem(${m.id})" class="text-red-600 hover:underline font-semibold text-xs">Hapus</button>
+                                        </td>
+                                    </tr>
+                                `;
+                            }).join('')}
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Model Modal -->
+                <div id="modelModal" class="fixed inset-0 bg-black/60 z-50 hidden flex items-center justify-center p-4">
+                    <div class="bg-white rounded-2xl w-full max-w-lg p-6 shadow-2xl">
+                        <h3 id="modelModalTitle" class="text-xl font-bold text-slate-900 mb-4">Tambah Model</h3>
+                        <form onsubmit="saveModel(event)" class="space-y-4">
+                            <input type="hidden" id="modelId">
+                            <div>
+                                <label class="block text-sm font-medium text-slate-700 mb-1">Brand *</label>
+                                <select id="modelBrandId" required class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                                    <option value="">Pilih Brand</option>
+                                    ${state.brands.map(b => `<option value="${b.id}">${b.nama}</option>`).join('')}
+                                </select>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-slate-700 mb-1">Nama Model *</label>
+                                <input type="text" id="modelNama" required class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="Contoh: iPhone 11, Galaxy A15">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-slate-700 mb-1">Foto Model (Opsional)</label>
+                                <input type="file" id="modelFotoFile" accept="image/*" onchange="previewImage(this, 'modelFotoPreview', 'modelFotoInput')" class="w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100">
+                                <input type="hidden" id="modelFotoInput">
+                                <div id="modelFotoPreviewContainer" class="mt-2 hidden"><img id="modelFotoPreview" class="w-16 h-16 object-contain border rounded-lg"></div>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-slate-700 mb-1">Deskripsi / Catatan (Opsional)</label>
+                                <textarea id="modelDeskripsi" class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none" rows="2"></textarea>
+                            </div>
+                            <div class="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label class="block text-sm font-medium text-slate-700 mb-1">Urutan</label>
+                                    <input type="number" id="modelUrutan" value="0" class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-slate-700 mb-1">Status</label>
+                                    <select id="modelStatus" class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                                        <option value="aktif">Aktif</option>
+                                        <option value="nonaktif">Nonaktif</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="flex justify-end gap-3 pt-4 border-t">
+                                <button type="button" onclick="closeModelModal()" class="px-4 py-2 text-slate-600 font-semibold text-sm">Batal</button>
+                                <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2 rounded-xl text-sm font-semibold">Simpan</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            `;
+        }
+
+        function openModelModal(id = null) {
+            document.getElementById('modelModal').classList.remove('hidden');
+            if (id) {
+                const m = state.models.find(x => x.id == id);
+                document.getElementById('modelModalTitle').innerText = 'Edit Model';
+                document.getElementById('modelId').value = m.id;
+                document.getElementById('modelBrandId').value = m.brandId;
+                document.getElementById('modelNama').value = m.namaModel;
+                document.getElementById('modelDeskripsi').value = m.deskripsi || '';
+                document.getElementById('modelUrutan').value = m.urutan || 0;
+                document.getElementById('modelStatus').value = m.status || 'aktif';
+                document.getElementById('modelFotoInput').value = m.foto || '';
+                if (m.foto) {
+                    document.getElementById('modelFotoPreview').src = m.foto;
+                    document.getElementById('modelFotoPreviewContainer').classList.remove('hidden');
+                } else {
+                    document.getElementById('modelFotoPreviewContainer').classList.add('hidden');
+                }
+            } else {
+                document.getElementById('modelModalTitle').innerText = 'Tambah Model';
+                document.getElementById('modelId').value = '';
+                document.getElementById('modelBrandId').value = '';
+                document.getElementById('modelNama').value = '';
+                document.getElementById('modelDeskripsi').value = '';
+                document.getElementById('modelUrutan').value = '0';
+                document.getElementById('modelStatus').value = 'aktif';
+                document.getElementById('modelFotoInput').value = '';
+                document.getElementById('modelFotoPreviewContainer').classList.add('hidden');
+            }
+        }
+        function closeModelModal() { document.getElementById('modelModal').classList.add('hidden'); }
+
+        async function saveModel(e) {
+            e.preventDefault();
+            const id = document.getElementById('modelId').value;
+            const data = {
+                brandId: Number(document.getElementById('modelBrandId').value),
+                namaModel: document.getElementById('modelNama').value,
+                foto: document.getElementById('modelFotoInput').value,
+                deskripsi: document.getElementById('modelDeskripsi').value,
+                urutan: Number(document.getElementById('modelUrutan').value),
+                status: document.getElementById('modelStatus').value
+            };
+            if (id) {
+                data.id = Number(id);
+                await updateRecord('models', data);
+            } else {
+                await addRecord('models', data);
+            }
+            state.models = await getAll('models');
+            closeModelModal();
+            render();
+        }
+
+        async function deleteModelItem(id) {
+            const relatedProducts = state.products.filter(p => p.modelId == id);
+            if (relatedProducts.length > 0) {
+                alert('Model ini masih memiliki produk terkait!');
+                return;
+            }
+            if (confirm('Apakah Anda yakin ingin menghapus model ini?')) {
+                await deleteRecord('models', id);
+                state.models = await getAll('models');
+                render();
+            }
+        }
+
+
+        // --- ADMIN CATEGORIES CRUD ---
+        function renderAdminCategories() {
+            return `
+                <div class="flex justify-between items-center mb-8">
+                    <div>
+                        <h2 class="text-2xl font-bold text-slate-900 mb-1">Kelola Jenis Sparepart</h2>
+                        <p class="text-sm text-slate-500">Tambah, edit, atau hapus kategori jenis sparepart.</p>
+                    </div>
+                    <button onclick="openCategoryModal()" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-xl text-sm font-semibold transition flex items-center gap-2"><i class="fa-solid fa-plus"></i> Tambah Jenis</button>
+                </div>
+                <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-xs">
+                    <table class="w-full text-left border-collapse">
+                        <thead>
+                            <tr class="bg-slate-50 border-b border-slate-200 text-xs text-slate-500 uppercase">
+                                <th class="p-4">Foto</th>
+                                <th class="p-4">Nama Jenis Sparepart</th>
+                                <th class="p-4">Urutan</th>
+                                <th class="p-4">Status</th>
+                                <th class="p-4 text-right">Aksi</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-100 text-sm">
+                            ${state.categories.length === 0 ? `<tr><td colspan="5" class="p-6 text-center text-slate-400">Belum ada data jenis sparepart.</td></tr>` : state.categories.map(c => `
+                                <tr>
+                                    <td class="p-4"><div class="w-10 h-10 bg-slate-50 rounded-lg flex items-center justify-center overflow-hidden border">${c.foto ? `<img src="${c.foto}" class="w-full h-full object-contain">` : `<i class="fa-solid fa-gear text-slate-300"></i>`}</div></td>
+                                    <td class="p-4 font-bold text-slate-800">${c.namaJenis}</td>
+                                    <td class="p-4 text-slate-500">${c.urutan || 0}</td>
+                                    <td class="p-4"><span class="px-2.5 py-1 rounded-full text-xs font-semibold ${c.status === 'nonaktif' ? 'bg-red-100 text-red-800' : 'bg-emerald-100 text-emerald-800'}">${c.status || 'Aktif'}</span></td>
+                                    <td class="p-4 text-right space-x-2">
+                                        <button onclick="openCategoryModal(${c.id})" class="text-blue-600 hover:underline font-semibold text-xs">Edit</button>
+                                        <button onclick="deleteCategoryItem(${c.id})" class="text-red-600 hover:underline font-semibold text-xs">Hapus</button>
+                                    </td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Category Modal -->
+                <div id="categoryModal" class="fixed inset-0 bg-black/60 z-50 hidden flex items-center justify-center p-4">
+                    <div class="bg-white rounded-2xl w-full max-w-lg p-6 shadow-2xl">
+                        <h3 id="categoryModalTitle" class="text-xl font-bold text-slate-900 mb-4">Tambah Jenis Sparepart</h3>
+                        <form onsubmit="saveCategory(event)" class="space-y-4">
+                            <input type="hidden" id="categoryId">
+                            <div>
+                                <label class="block text-sm font-medium text-slate-700 mb-1">Nama Jenis Sparepart *</label>
+                                <input type="text" id="categoryNama" required class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="Contoh: LCD / Touchscreen, Baterai">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-slate-700 mb-1">Foto Kategori (Opsional)</label>
+                                <input type="file" id="categoryFotoFile" accept="image/*" onchange="previewImage(this, 'categoryFotoPreview', 'categoryFotoInput')" class="w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100">
+                                <input type="hidden" id="categoryFotoInput">
+                                <div id="categoryFotoPreviewContainer" class="mt-2 hidden"><img id="categoryFotoPreview" class="w-16 h-16 object-contain border rounded-lg"></div>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-slate-700 mb-1">Deskripsi (Opsional)</label>
+                                <textarea id="categoryDeskripsi" class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none" rows="2"></textarea>
+                            </div>
+                            <div class="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label class="block text-sm font-medium text-slate-700 mb-1">Urutan</label>
+                                    <input type="number" id="categoryUrutan" value="0" class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-slate-700 mb-1">Status</label>
+                                    <select id="categoryStatus" class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                                        <option value="aktif">Aktif</option>
+                                        <option value="nonaktif">Nonaktif</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="flex justify-end gap-3 pt-4 border-t">
+                                <button type="button" onclick="closeCategoryModal()" class="px-4 py-2 text-slate-600 font-semibold text-sm">Batal</button>
+                                <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2 rounded-xl text-sm font-semibold">Simpan</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            `;
+        }
+
+        function openCategoryModal(id = null) {
+            document.getElementById('categoryModal').classList.remove('hidden');
+            if (id) {
+                const c = state.categories.find(x => x.id == id);
+                document.getElementById('categoryModalTitle').innerText = 'Edit Jenis Sparepart';
+                document.getElementById('categoryId').value = c.id;
+                document.getElementById('categoryNama').value = c.namaJenis;
+                document.getElementById('categoryDeskripsi').value = c.deskripsi || '';
+                document.getElementById('categoryUrutan').value = c.urutan || 0;
+                document.getElementById('categoryStatus').value = c.status || 'aktif';
+                document.getElementById('categoryFotoInput').value = c.foto || '';
+                if (c.foto) {
+                    document.getElementById('categoryFotoPreview').src = c.foto;
+                    document.getElementById('categoryFotoPreviewContainer').classList.remove('hidden');
+                } else {
+                    document.getElementById('categoryFotoPreviewContainer').classList.add('hidden');
+                }
+            } else {
+                document.getElementById('categoryModalTitle').innerText = 'Tambah Jenis Sparepart';
+                document.getElementById('categoryId').value = '';
+                document.getElementById('categoryNama').value = '';
+                document.getElementById('categoryDeskripsi').value = '';
+                document.getElementById('categoryUrutan').value = '0';
+                document.getElementById('categoryStatus').value = 'aktif';
+                document.getElementById('categoryFotoInput').value = '';
+                document.getElementById('categoryFotoPreviewContainer').classList.add('hidden');
+            }
+        }
+        function closeCategoryModal() { document.getElementById('categoryModal').classList.add('hidden'); }
+
+        async function saveCategory(e) {
+            e.preventDefault();
+            const id = document.getElementById('categoryId').value;
+            const data = {
+                namaJenis: document.getElementById('categoryNama').value,
+                foto: document.getElementById('categoryFotoInput').value,
+                deskripsi: document.getElementById('categoryDeskripsi').value,
+                urutan: Number(document.getElementById('categoryUrutan').value),
+                status: document.getElementById('categoryStatus').value
+            };
+            if (id) {
+                data.id = Number(id);
+                await updateRecord('categories', data);
+            } else {
+                await addRecord('categories', data);
+            }
+            state.categories = await getAll('categories');
+            closeCategoryModal();
+            render();
+        }
+
+        async function deleteCategoryItem(id) {
+            if (confirm('Apakah Anda yakin ingin menghapus jenis sparepart ini?')) {
+                await deleteRecord('categories', id);
+                state.categories = await getAll('categories');
+                render();
+            }
+        }
+
+
+        // --- ADMIN GRADES CRUD ---
+        function renderAdminGrades() {
+            return `
+                <div class="flex justify-between items-center mb-8">
+                    <div>
+                        <h2 class="text-2xl font-bold text-slate-900 mb-1">Kelola Grade</h2>
+                        <p class="text-sm text-slate-500">Tambah, edit, atau hapus tingkat grade sparepart.</p>
+                    </div>
+                    <button onclick="openGradeModal()" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-xl text-sm font-semibold transition flex items-center gap-2"><i class="fa-solid fa-plus"></i> Tambah Grade</button>
+                </div>
+                <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-xs">
+                    <table class="w-full text-left border-collapse">
+                        <thead>
+                            <tr class="bg-slate-50 border-b border-slate-200 text-xs text-slate-500 uppercase">
+                                <th class="p-4">Nama Grade</th>
+                                <th class="p-4">Deskripsi</th>
+                                <th class="p-4">Urutan</th>
+                                <th class="p-4">Status</th>
+                                <th class="p-4 text-right">Aksi</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-100 text-sm">
+                            ${state.grades.length === 0 ? `<tr><td colspan="5" class="p-6 text-center text-slate-400">Belum ada data grade.</td></tr>` : state.grades.map(g => `
+                                <tr>
+                                    <td class="p-4 font-bold text-slate-800">${g.namaGrade}</td>
+                                    <td class="p-4 text-slate-500">${g.deskripsi || '-'}</td>
+                                    <td class="p-4 text-slate-500">${g.urutan || 0}</td>
+                                    <td class="p-4"><span class="px-2.5 py-1 rounded-full text-xs font-semibold ${g.status === 'nonaktif' ? 'bg-red-100 text-red-800' : 'bg-emerald-100 text-emerald-800'}">${g.status || 'Aktif'}</span></td>
+                                    <td class="p-4 text-right space-x-2">
+                                        <button onclick="openGradeModal(${g.id})" class="text-blue-600 hover:underline font-semibold text-xs">Edit</button>
+                                        <button onclick="deleteGradeItem(${g.id})" class="text-red-600 hover:underline font-semibold text-xs">Hapus</button>
+                                    </td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Grade Modal -->
+                <div id="gradeModal" class="fixed inset-0 bg-black/60 z-50 hidden flex items-center justify-center p-4">
+                    <div class="bg-white rounded-2xl w-full max-w-lg p-6 shadow-2xl">
+                        <h3 id="gradeModalTitle" class="text-xl font-bold text-slate-900 mb-4">Tambah Grade</h3>
+                        <form onsubmit="saveGrade(event)" class="space-y-4">
+                            <input type="hidden" id="gradeId">
+                            <div>
+                                <label class="block text-sm font-medium text-slate-700 mb-1">Nama Grade *</label>
+                                <input type="text" id="gradeNama" required class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="Contoh: PREMIUM, STANDARD, ECONOMY">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-slate-700 mb-1">Deskripsi</label>
+                                <textarea id="gradeDeskripsi" class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none" rows="2"></textarea>
+                            </div>
+                            <div class="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label class="block text-sm font-medium text-slate-700 mb-1">Urutan</label>
+                                    <input type="number" id="gradeUrutan" value="0" class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-slate-700 mb-1">Status</label>
+                                    <select id="gradeStatus" class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                                        <option value="aktif">Aktif</option>
+                                        <option value="nonaktif">Nonaktif</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="flex justify-end gap-3 pt-4 border-t">
+                                <button type="button" onclick="closeGradeModal()" class="px-4 py-2 text-slate-600 font-semibold text-sm">Batal</button>
+                                <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2 rounded-xl text-sm font-semibold">Simpan</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            `;
+        }
+
+        function openGradeModal(id = null) {
+            document.getElementById('gradeModal').classList.remove('hidden');
+            if (id) {
+                const g = state.grades.find(x => x.id == id);
+                document.getElementById('gradeModalTitle').innerText = 'Edit Grade';
+                document.getElementById('gradeId').value = g.id;
+                document.getElementById('gradeNama').value = g.namaGrade;
+                document.getElementById('gradeDeskripsi').value = g.deskripsi || '';
+                document.getElementById('gradeUrutan').value = g.urutan || 0;
+                document.getElementById('gradeStatus').value = g.status || 'aktif';
+            } else {
+                document.getElementById('gradeModalTitle').innerText = 'Tambah Grade';
+                document.getElementById('gradeId').value = '';
+                document.getElementById('gradeNama').value = '';
+                document.getElementById('gradeDeskripsi').value = '';
+                document.getElementById('gradeUrutan').value = '0';
+                document.getElementById('gradeStatus').value = 'aktif';
+            }
+        }
+        function closeGradeModal() { document.getElementById('gradeModal').classList.add('hidden'); }
+
+        async function saveGrade(e) {
+            e.preventDefault();
+            const id = document.getElementById('gradeId').value;
+            const data = {
+                namaGrade: document.getElementById('gradeNama').value,
+                deskripsi: document.getElementById('gradeDeskripsi').value,
+                urutan: Number(document.getElementById('gradeUrutan').value),
+                status: document.getElementById('gradeStatus').value
+            };
+            if (id) {
+                data.id = Number(id);
+                await updateRecord('grades', data);
+            } else {
+                await addRecord('grades', data);
+            }
+            state.grades = await getAll('grades');
+            closeGradeModal();
+            render();
+        }
+
+        async function deleteGradeItem(id) {
+            if (confirm('Apakah Anda yakin ingin menghapus grade ini?')) {
+                await deleteRecord('grades', id);
+                state.grades = await getAll('grades');
+                render();
+            }
+        }
+
+
+        // --- ADMIN PRODUCTS CRUD ---
+        function renderAdminProducts() {
+            return `
+                <div class="flex justify-between items-center mb-8">
+                    <div>
+                        <h2 class="text-2xl font-bold text-slate-900 mb-1">Kelola Produk Sparepart</h2>
+                        <p class="text-sm text-slate-500">Tambah, edit harga, status, atau hapus produk.</p>
+                    </div>
+                    <button onclick="openProductModal()" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-xl text-sm font-semibold transition flex items-center gap-2"><i class="fa-solid fa-plus"></i> Tambah Produk</button>
+                </div>
+                <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-xs">
+                    <table class="w-full text-left border-collapse">
+                        <thead>
+                            <tr class="bg-slate-50 border-b border-slate-200 text-xs text-slate-500 uppercase">
+                                <th class="p-4">Foto</th>
+                                <th class="p-4">Produk</th>
+                                <th class="p-4">Brand / Model</th>
+                                <th class="p-4">Grade</th>
+                                <th class="p-4">Harga</th>
+                                <th class="p-4">Status</th>
+                                <th class="p-4 text-right">Aksi</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-100 text-sm">
+                            ${state.products.length === 0 ? `<tr><td colspan="7" class="p-6 text-center text-slate-400">Belum ada data produk.</td></tr>` : state.products.map(p => {
+                                const brand = state.brands.find(b => b.id == p.brandId);
+                                const model = state.models.find(m => m.id == p.modelId);
+                                const category = state.categories.find(c => c.id == p.categoryId);
+                                const grade = state.grades.find(g => g.id == p.gradeId);
+                                const statusColor = p.status === 'Tersedia' ? 'bg-emerald-100 text-emerald-800' : p.status === 'Stok Terbatas' ? 'bg-amber-100 text-amber-800' : 'bg-red-100 text-red-800';
+                                return `
+                                    <tr>
+                                        <td class="p-4"><div class="w-10 h-10 bg-slate-50 rounded-lg flex items-center justify-center overflow-hidden border">${p.foto ? `<img src="${p.foto}" class="w-full h-full object-cover">` : `<i class="fa-solid fa-image text-slate-300"></i>`}</div></td>
+                                        <td class="p-4 font-bold text-slate-800">${p.namaSparepart}<br><span class="text-xs font-normal text-slate-400">${category?.namaJenis || ''}</span></td>
+                                        <td class="p-4 text-slate-600 text-xs">${brand?.nama || ''} / <br><strong class="text-slate-800">${model?.namaModel || ''}</strong></td>
+                                        <td class="p-4"><span class="bg-blue-50 text-blue-600 px-2 py-0.5 rounded text-xs font-bold">${grade?.namaGrade || '-'}</span></td>
+                                        <td class="p-4 font-extrabold text-slate-900">${formatRupiah(p.harga)}</td>
+                                        <td class="p-4"><span class="px-2.5 py-1 rounded-full text-xs font-semibold ${statusColor}">${p.status}</span></td>
+                                        <td class="p-4 text-right space-x-2">
+                                            <button onclick="openProductModal(${p.id})" class="text-blue-600 hover:underline font-semibold text-xs">Edit</button>
+                                            <button onclick="deleteProductItem(${p.id})" class="text-red-600 hover:underline font-semibold text-xs">Hapus</button>
+                                        </td>
+                                    </tr>
+                                `;
+                            }).join('')}
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Product Modal -->
+                <div id="productModal" class="fixed inset-0 bg-black/60 z-50 hidden flex items-center justify-center p-4">
+                    <div class="bg-white rounded-2xl w-full max-w-xl p-6 shadow-2xl max-h-[90vh] overflow-y-auto">
+                        <h3 id="productModalTitle" class="text-xl font-bold text-slate-900 mb-4">Tambah Produk</h3>
+                        <form onsubmit="saveProduct(event)" class="space-y-4">
+                            <input type="hidden" id="productId">
+                            <div class="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label class="block text-sm font-medium text-slate-700 mb-1">Brand *</label>
+                                    <select id="productBrandId" required onchange="filterAdminModels(this.value)" class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                                        <option value="">Pilih Brand</option>
+                                        ${state.brands.map(b => `<option value="${b.id}">${b.nama}</option>`).join('')}
+                                    </select>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-slate-700 mb-1">Model *</label>
+                                    <select id="productModelId" required class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                                        <option value="">Pilih Model</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label class="block text-sm font-medium text-slate-700 mb-1">Jenis Sparepart *</label>
+                                    <select id="productCategoryId" required class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                                        <option value="">Pilih Jenis</option>
+                                        ${state.categories.map(c => `<option value="${c.id}">${c.namaJenis}</option>`).join('')}
+                                    </select>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-slate-700 mb-1">Grade *</label>
+                                    <select id="productGradeId" required class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                                        <option value="">Pilih Grade</option>
+                                        ${state.grades.map(g => `<option value="${g.id}">${g.namaGrade}</option>`).join('')}
+                                    </select>
+                                </div>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-slate-700 mb-1">Nama Sparepart / Keterangan *</label>
+                                <input type="text" id="productNama" required class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="Contoh: LCD Original OLED iPhone 11">
+                            </div>
+                            <div class="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label class="block text-sm font-medium text-slate-700 mb-1">Harga (Rp) *</label>
+                                    <input type="number" id="productHarga" required class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="150000">
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-slate-700 mb-1">Status Stok *</label>
+                                    <select id="productStatus" required class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                                        <option value="Tersedia">Tersedia</option>
+                                        <option value="Stok Terbatas">Stok Terbatas</option>
+                                        <option value="Habis">Habis</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-slate-700 mb-1">Foto Produk (Opsional)</label>
+                                <input type="file" id="productFotoFile" accept="image/*" onchange="previewImage(this, 'productFotoPreview', 'productFotoInput')" class="w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100">
+                                <input type="hidden" id="productFotoInput">
+                                <div id="productFotoPreviewContainer" class="mt-2 hidden"><img id="productFotoPreview" class="w-20 h-20 object-cover border rounded-lg"></div>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-slate-700 mb-1">Deskripsi Produk</label>
+                                <textarea id="productDeskripsi" class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none" rows="3"></textarea>
+                            </div>
+                            <div class="flex justify-end gap-3 pt-4 border-t">
+                                <button type="button" onclick="closeProductModal()" class="px-4 py-2 text-slate-600 font-semibold text-sm">Batal</button>
+                                <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2 rounded-xl text-sm font-semibold">Simpan Produk</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            `;
+        }
+
+        function filterAdminModels(brandId, selectedModelId = null) {
+            const modelSelect = document.getElementById('productModelId');
+            modelSelect.innerHTML = '<option value="">Pilih Model</option>';
+            const filtered = state.models.filter(m => m.brandId == brandId);
+            filtered.forEach(m => {
+                const opt = document.createElement('option');
+                opt.value = m.id;
+                opt.innerText = m.namaModel;
+                if (selectedModelId && m.id == selectedModelId) opt.selected = true;
+                modelSelect.appendChild(opt);
+            });
+        }
+
+        function openProductModal(id = null) {
+            document.getElementById('productModal').classList.remove('hidden');
+            if (id) {
+                const p = state.products.find(x => x.id == id);
+                document.getElementById('productModalTitle').innerText = 'Edit Produk';
+                document.getElementById('productId').value = p.id;
+                document.getElementById('productBrandId').value = p.brandId;
+                filterAdminModels(p.brandId, p.modelId);
+                document.getElementById('productCategoryId').value = p.categoryId;
+                document.getElementById('productGradeId').value = p.gradeId;
+                document.getElementById('productNama').value = p.namaSparepart;
+                document.getElementById('productHarga').value = p.harga;
+                document.getElementById('productStatus').value = p.status;
+                document.getElementById('productDeskripsi').value = p.deskripsi || '';
+                document.getElementById('productFotoInput').value = p.foto || '';
+                if (p.foto) {
+                    document.getElementById('productFotoPreview').src = p.foto;
+                    document.getElementById('productFotoPreviewContainer').classList.remove('hidden');
+                } else {
+                    document.getElementById('productFotoPreviewContainer').classList.add('hidden');
+                }
+            } else {
+                document.getElementById('productModalTitle').innerText = 'Tambah Produk';
+                document.getElementById('productId').value = '';
+                document.getElementById('productBrandId').value = '';
+                document.getElementById('productModelId').innerHTML = '<option value="">Pilih Model</option>';
+                document.getElementById('productCategoryId').value = '';
+                document.getElementById('productGradeId').value = '';
+                document.getElementById('productNama').value = '';
+                document.getElementById('productHarga').value = '';
+                document.getElementById('productStatus').value = 'Tersedia';
+                document.getElementById('productDeskripsi').value = '';
+                document.getElementById('productFotoInput').value = '';
+                document.getElementById('productFotoPreviewContainer').classList.add('hidden');
+            }
+        }
+        function closeProductModal() { document.getElementById('productModal').classList.add('hidden'); }
+
+        async function saveProduct(e) {
+            e.preventDefault();
+            const id = document.getElementById('productId').value;
+            const data = {
+                brandId: Number(document.getElementById('productBrandId').value),
+                modelId: Number(document.getElementById('productModelId').value),
+                categoryId: Number(document.getElementById('productCategoryId').value),
+                gradeId: Number(document.getElementById('productGradeId').value),
+                namaSparepart: document.getElementById('productNama').value,
+                harga: Number(document.getElementById('productHarga').value),
+                status: document.getElementById('productStatus').value,
+                foto: document.getElementById('productFotoInput').value,
+                deskripsi: document.getElementById('productDeskripsi').value
+            };
+            if (id) {
+                data.id = Number(id);
+                await updateRecord('products', data);
+            } else {
+                await addRecord('products', data);
+            }
+            state.products = await getAll('products');
+            closeProductModal();
+            render();
+        }
+
+        async function deleteProductItem(id) {
+            if (confirm('Apakah Anda yakin ingin menghapus produk ini?')) {
+                await deleteRecord('products', id);
+                state.products = await getAll('products');
+                render();
+            }
+        }
+
+
+        // --- ADMIN SETTINGS ---
+        function renderAdminSettings() {
+            return `
+                <div class="mb-8">
+                    <h2 class="text-2xl font-bold text-slate-900 mb-1">Pengaturan Toko</h2>
+                    <p class="text-sm text-slate-500">Kelola informasi toko dan kontak WhatsApp.</p>
+                </div>
+                <div class="bg-white rounded-2xl border border-slate-200 p-6 max-w-2xl shadow-xs">
+                    <form onsubmit="saveSettings(event)" class="space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-1">Nama Toko</label>
+                            <input type="text" id="settingStoreName" value="${state.settings.storeName || ''}" required class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-1">Tagline / Slogan</label>
+                            <input type="text" id="settingTagline" value="${state.settings.tagline || ''}" class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-1">Alamat Toko</label>
+                            <textarea id="settingAddress" rows="2" class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none">${state.settings.address || ''}</textarea>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-1">Nomor WhatsApp</label>
+                            <input type="text" id="settingWhatsapp" value="${state.settings.whatsapp || ''}" required class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="0821-3393-5158">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-1">Logo Toko</label>
+                            <input type="file" id="settingLogoFile" accept="image/*" onchange="previewImage(this, 'settingLogoPreview', 'settingLogoInput')" class="w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100">
+                            <input type="hidden" id="settingLogoInput" value="${state.settings.logo || ''}">
+                            <div id="settingLogoPreviewContainer" class="mt-2 ${state.settings.logo ? '' : 'hidden'}"><img id="settingLogoPreview" src="${state.settings.logo || ''}" class="w-16 h-16 object-contain border rounded-lg"></div>
+                        </div>
+                        <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2.5 rounded-xl text-sm font-semibold transition">Simpan Pengaturan</button>
+                    </form>
+                </div>
+            `;
+        }
+
+        async function saveSettings(e) {
+            e.preventDefault();
+            state.settings = {
+                id: state.settings.id || 1,
+                storeName: document.getElementById('settingStoreName').value,
+                tagline: document.getElementById('settingTagline').value,
+                address: document.getElementById('settingAddress').value,
+                whatsapp: document.getElementById('settingWhatsapp').value,
+                logo: document.getElementById('settingLogoInput').value
+            };
+            await updateRecord('settings', state.settings);
+            alert('Pengaturan toko berhasil disimpan!');
+            render();
+        }
+
+
+        // --- BACKUP & RESTORE ---
+        function renderAdminBackup() {
+            return `
+                <div class="mb-8">
+                    <h2 class="text-2xl font-bold text-slate-900 mb-1">Backup &amp; Restore Data</h2>
+                    <p class="text-sm text-slate-500">Unduh seluruh database aplikasi atau pulihkan dari file backup.</p>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6 max-w-4xl">
+                    <div class="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs flex flex-col justify-between">
+                        <div>
+                            <h3 class="font-bold text-slate-900 text-lg mb-2"><i class="fa-solid fa-download text-blue-600 mr-2"></i> Backup Database</h3>
+                            <p class="text-xs text-slate-500 mb-6 leading-relaxed">Simpan seluruh data brand, model, jenis sparepart, grade, produk, dan pengaturan toko ke dalam satu file cadangan.</p>
+                        </div>
+                        <button onclick="downloadBackup()" class="w-full bg-blue-600 hover:bg-blue-700 text-white py-3 rounded-xl text-sm font-semibold transition">Unduh File Backup</button>
+                    </div>
+                    <div class="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs flex flex-col justify-between">
+                        <div>
+                            <h3 class="font-bold text-slate-900 text-lg mb-2"><i class="fa-solid fa-upload text-blue-600 mr-2"></i> Restore Database</h3>
+                            <p class="text-xs text-slate-500 mb-6 leading-relaxed">Pilih file backup sebelumnya untuk memulihkan seluruh data aplikasi.</p>
+                            <input type="file" id="restoreFile" accept=".json" class="w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-slate-100 file:text-slate-700 hover:file:bg-slate-200 mb-4">
+                        </div>
+                        <button onclick="processRestore()" class="w-full bg-slate-900 hover:bg-slate-800 text-white py-3 rounded-xl text-sm font-semibold transition">Pulihkan Data</button>
+                    </div>
+                </div>
+            `;
+        }
+
+        async function downloadBackup() {
+            const backupData = {
+                brands: await getAll('brands'),
+                models: await getAll('models'),
+                categories: await getAll('categories'),
+                grades: await getAll('grades'),
+                products: await getAll('products'),
+                settings: await getAll('settings')
+            };
+            const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(backupData, null, 2));
+            const dlAnchor = document.createElement('a');
+            dlAnchor.setAttribute("href", dataStr);
+            dlAnchor.setAttribute("download", `donetech_backup_${new Date().toISOString().slice(0,10)}.json`);
+            document.body.appendChild(dlAnchor);
+            dlAnchor.click();
+            dlAnchor.remove();
+        }
+
+        async function processRestore() {
+            const fileInput = document.getElementById('restoreFile');
+            if (!fileInput.files || fileInput.files.length === 0) {
+                alert('Pilih file backup terlebih dahulu!');
+                return;
+            }
+            if (!confirm('PERINGATAN: Restore akan menimpa seluruh data yang ada saat ini. Lanjutkan?')) return;
+
+            const reader = new FileReader();
+            reader.onload = async function(e) {
+                try {
+                    const data = JSON.parse(e.target.result);
+                    // Hapus dan masukkan ulang data per store
+                    for (const storeName of STORES) {
+                        const existing = await getAll(storeName);
+                        for (const item of existing) {
+                            await deleteRecord(storeName, item.id);
+                        }
+                        if (data[storeName]) {
+                            for (const item of data[storeName]) {
+                                delete item.id; // biarkan autoIncrement membuat id baru
+                                await addRecord(storeName, item);
+                            }
+                        }
+                    }
+                    alert('Restore database berhasil!');
+                    await loadAppData();
+                } catch (err) {
+                    console.error(err);
+                    alert('Gagal membaca file backup!');
+                }
+            };
+            reader.readAsText(fileInput.files[0]);
+        }
+
+
+        // --- UTILS & HELPERS ---
+        function formatRupiah(num) {
+            return 'Rp' + Number(num).toLocaleString('id-ID');
+        }
+
+        function previewImage(input, previewImgId, hiddenInputId) {
+            if (input.files && input.files[0]) {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    document.getElementById(previewImgId).src = e.target.result;
+                    document.getElementById(previewImgId.replace('Preview', 'PreviewContainer')).classList.remove('hidden');
+                    document.getElementById(hiddenInputId).value = e.target.result;
+                }
+                reader.readAsDataURL(input.files[0]);
+            }
+        }
+
+        function getBrandName(id) { return state.brands.find(b => b.id == id)?.nama || ''; }
+        function getModelName(id) { return state.models.find(m => m.id == id)?.namaModel || ''; }
+        function getCategoryName(id) { return state.categories.find(c => c.id == id)?.namaJenis || ''; }
+
+        // --- AUTH ADMIN ---
+        function openLoginModal() { document.getElementById('loginModal').classList.remove('hidden'); }
+        function closeLoginModal() { document.getElementById('loginModal').classList.add('hidden'); document.getElementById('loginError').classList.add('hidden'); }
+        
+        function handleLogin(e) {
+            e.preventDefault();
+            const u = document.getElementById('adminUser').value;
+            const p = document.getElementById('adminPass').value;
+            if (u === 'admin' && p === 'donetech123') {
+                state.isAdminLoggedIn = true;
+                state.view = 'admin';
+                closeLoginModal();
+                render();
+            } else {
+                document.getElementById('loginError').classList.remove('hidden');
+            }
+        }
+
+        function logoutAdmin() {
+            state.isAdminLoggedIn = false;
+            state.view = 'customer';
+            render();
+        }
+
+        // --- INIT ON LOAD ---
+        window.onload = () => {
+            loadAppData();
+        };
+    </script>
+</body>
+</html>
